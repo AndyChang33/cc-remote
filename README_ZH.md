@@ -1,6 +1,7 @@
 # CC Remote
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) · [English](README.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<br>[English](README.md)
 
 在手机/浏览器上实时监控和操控电脑上的 Claude Code 任务。
 
