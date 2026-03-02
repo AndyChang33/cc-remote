@@ -1,6 +1,6 @@
 # CC Remote
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) · [中文](README_ZH.md)
 
 Monitor and control Claude Code tasks from your phone or browser in real time.
 
@@ -203,7 +203,3 @@ ccd-stop         # Docker: stop container
 ## License
 
 [MIT](LICENSE)
-
----
-
-[中文](README_ZH.md)

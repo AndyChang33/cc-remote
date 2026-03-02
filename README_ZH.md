@@ -1,6 +1,6 @@
 # CC Remote
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) · [English](README.md)
 
 在手机/浏览器上实时监控和操控电脑上的 Claude Code 任务。
 
@@ -159,7 +159,3 @@ ngrok http 3456 --basic-auth="user:yourpassword"
 ## License
 
 [MIT](LICENSE)
-
----
-
-[English](README.md)
