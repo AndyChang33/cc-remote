@@ -2,6 +2,7 @@
   "name": "cc-remote",
   "version": "1.0.0",
   "description": "手机远程控制 Claude Code 任务",
+  "license": "MIT",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

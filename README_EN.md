@@ -1,5 +1,7 @@
 # CC Remote
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Monitor and control Claude Code tasks from your phone or browser in real time.
 
 ## Install
