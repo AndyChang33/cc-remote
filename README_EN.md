@@ -197,3 +197,7 @@ ccd-stop         # Docker: stop container
 | `CC_REMOTE_URL` | `ws://localhost:3456/ws` | Server URL for ccr.js / ccrd.js |
 | `NO_PTY` | `0` | Set to `1` to disable local PTY (Docker mode) |
 | `SHELL` | System default | Shell to spawn for PTY sessions |
+
+## License
+
+[MIT](LICENSE)

@@ -153,3 +153,7 @@ ngrok http 3456 --basic-auth="user:yourpassword"
 | `PORT` | `3456` | 服务端口 |
 | `CC_WORK_DIR` | `$HOME` | PTY 会话的初始工作目录 |
 | `CC_REMOTE_URL` | `ws://localhost:3456/ws` | ccr.js 连接的服务器地址 |
+
+## License
+
+[MIT](LICENSE)
