@@ -12,8 +12,8 @@
  *   # or add to PATH and run: ccw [claude args...]
  */
 
-const pty = require('./node_modules/node-pty');
-const { WebSocket } = require('./node_modules/ws');
+const pty = require('../node_modules/node-pty');
+const { WebSocket } = require('../node_modules/ws');
 const os = require('os');
 
 const SERVER = process.env.CC_REMOTE_URL || 'ws://localhost:3456/ws';

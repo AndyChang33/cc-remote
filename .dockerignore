@@ -4,5 +4,4 @@ node_modules
 .gitignore
 README.md
 CLAUDE.md
-ccr.js
-ccrn.js
+scripts

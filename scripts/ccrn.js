@@ -16,11 +16,11 @@ const path = require('path');
 const http = require('http');
 
 const PORT = process.env.PORT || 3456;
-const DIR = __dirname;
+const ROOT = path.join(__dirname, '..');
 
 // ── Step 1: Start server.js (background, output to stderr) ──────────────────
 
-const server = spawn(process.execPath, [path.join(DIR, 'server.js')], {
+const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, PORT: String(PORT), NGROK: '1' },
 });
@@ -57,7 +57,7 @@ function waitForServer(cb) {
 waitForServer(() => {
   // ── Step 3: Launch ccr.js (inherits full stdio for TTY passthrough) ────────
   const ccrArgs = process.argv.slice(2);
-  const ccr = spawn(process.execPath, [path.join(DIR, 'ccr.js'), ...ccrArgs], {
+  const ccr = spawn(process.execPath, [path.join(ROOT, 'scripts', 'ccr.js'), ...ccrArgs], {
     stdio: 'inherit',
     env: { ...process.env, CC_REMOTE_URL: `ws://localhost:${PORT}/ws` },
   });

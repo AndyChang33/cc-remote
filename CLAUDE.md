@@ -29,11 +29,11 @@ ccrd                             # 单独启动 host daemon（容器已运行时
 ### Shell aliases (已配置到 ~/.zshrc)
 
 ```bash
-alias ccr="node <project-dir>/ccr.js"    # claude + proxy 到 server
-alias ccrn="node <project-dir>/ccrn.js"   # server + ngrok + claude
-alias ccrd="node <project-dir>/ccrd.js"   # host daemon（Docker 模式）
-alias ccd="<project-dir>/cc-docker-start.sh"   # Docker 一键启动
-alias ccd-stop="<project-dir>/cc-docker-stop.sh"  # Docker 停止
+alias ccr="node <project-dir>/scripts/ccr.js"    # claude + proxy 到 server
+alias ccrn="node <project-dir>/scripts/ccrn.js"   # server + ngrok + claude
+alias ccrd="node <project-dir>/scripts/ccrd.js"   # host daemon（Docker 模式）
+alias ccd="<project-dir>/scripts/cc-docker-start.sh"   # Docker 一键启动
+alias ccd-stop="<project-dir>/scripts/cc-docker-stop.sh"  # Docker 停止
 ```
 
 ## Architecture
@@ -109,11 +109,13 @@ PTY sessions and `ccr.js` both set `CLAUDECODE: undefined` when spawning claude.
 ### Docker files
 
 - `Dockerfile` — 多阶段构建 (alpine)，编译 node-pty，运行时装 bash
-- `.dockerignore` — 排除 node_modules、.git、ccr/ccrn/ccrd 等宿主机文件
+- `.dockerignore` — 排除 node_modules、.git、scripts 等宿主机文件
 - `docker-compose.yml` — 端口 3456，`NO_PTY=1`
-- `cc-docker-start.sh` — `docker compose up -d` + `node ccrd.js`
-- `cc-docker-stop.sh` — `docker compose down`
-- `ccrd.js` — 宿主机 daemon，接收 `spawn` 请求，创建本地 PTY 并 proxy 回容器
+- `scripts/cc-docker-start.sh` — `docker compose up -d` + `node scripts/ccrd.js`
+- `scripts/cc-docker-stop.sh` — `docker compose down`
+- `scripts/ccrd.js` — 宿主机 daemon，接收 `spawn` 请求，创建本地 PTY 并 proxy 回容器
+- `scripts/ccr.js` — claude wrapper，代理 TTY 到 server
+- `scripts/ccrn.js` — server + ngrok + claude 一键启动
 
 ### HTML pages
 
