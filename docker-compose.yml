@@ -1,0 +1,10 @@
+services:
+  cc-mobile:
+    build: .
+    ports:
+      - "3456:3456"
+    environment:
+      - PORT=3456
+      - SHELL=/bin/bash
+      - NO_PTY=1
+    restart: unless-stopped

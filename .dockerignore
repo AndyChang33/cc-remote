@@ -1,0 +1,8 @@
+node_modules
+.git
+.claude
+.gitignore
+README.md
+CLAUDE.md
+ccr.js
+ccrn.js

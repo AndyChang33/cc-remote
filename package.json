@@ -1,0 +1,13 @@
+{
+  "name": "cc-remote",
+  "version": "1.0.0",
+  "description": "手机远程控制 Claude Code 任务",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.16.0"
+  }
+}
