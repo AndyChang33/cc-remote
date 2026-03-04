@@ -101,6 +101,7 @@ function sessionInfo(s) {
     createdAt: s.createdAt,
     lastActivity: s.lastActivity,
     preview: s.preview,
+    archived: s.archived || false,
   };
 }
 
@@ -234,6 +235,7 @@ function monitorInfo(m) {
     lastActivity: m.lastActivity,
     preview: m.preview,
     proxyConnected: !!(m._proxyWs && m._proxyWs.readyState === 1),
+    archived: m.archived || false,
   };
 }
 
@@ -386,6 +388,22 @@ ${COMMON_CSS}
     cursor:pointer; padding:2px 6px; color:var(--text-dim);
     opacity:0.5; flex-shrink:0; line-height:1; }
   .edit-btn:active { opacity:1; transform:scale(1.2); }
+  .card-tag.dialog { background:#1e88e5; color:#fff; }
+  .card-actions { display:flex; gap:2px; margin-top:4px; justify-content:flex-end; }
+  .card-act-btn { background:transparent; border:none; font-size:13px;
+    cursor:pointer; padding:2px 6px; color:var(--text-dim);
+    opacity:0.5; line-height:1; }
+  .card-act-btn:active { opacity:1; transform:scale(1.2); }
+  .archive-section { border-top:1px solid var(--border); }
+  .archive-toggle { display:flex; align-items:center; gap:8px; padding:12px 16px;
+    font-size:13px; color:var(--text-dim); cursor:pointer; background:transparent;
+    border:none; width:100%; text-align:left; }
+  .archive-toggle:active { background:var(--surface); }
+  .archive-toggle .arrow { transition:transform .2s; display:inline-block; }
+  .archive-toggle .arrow.open { transform:rotate(90deg); }
+  .archive-list { display:none; }
+  .archive-list.open { display:block; }
+  .archive-list .card { opacity:0.6; }
 </style>
 </head>
 <body>
@@ -400,10 +418,24 @@ ${COMMON_CSS}
     <span class="badge" id="badge"></span>
     <button class="btn-new" id="newBtn">+ 新建</button>
   </div>
+  <div style="padding:8px 16px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--border);font-family:monospace;display:flex;align-items:center;gap:6px;flex-shrink:0;">
+    <span style="opacity:.5;">📡</span>
+    <span id="lanAddr"></span>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('lanAddr').textContent).then(function(){this.textContent='已复制';var b=this;setTimeout(function(){b.textContent='复制'},1000)}.bind(this))" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:11px;padding:2px 8px;cursor:pointer;">复制</button>
+  </div>
+  <script>document.getElementById('lanAddr').textContent=location.protocol+'//'+location.host;</script>
   <div class="list" id="list">
     <div class="empty" id="empty">
       <div class="empty-icon">🖥️</div>
       <p>${NO_PTY ? '运行 ccrd 后点击「新建」在宿主机创建终端' : '点击「新建」创建终端会话'}</p>
+    </div>
+    <div id="activeList"></div>
+    <div class="archive-section hidden" id="archiveSection">
+      <button class="archive-toggle" id="archiveToggle">
+        <span class="arrow" id="archiveArrow">▸</span> 已归档
+        <span id="archiveCount" style="font-size:11px;opacity:0.6;"></span>
+      </button>
+      <div class="archive-list" id="archiveList"></div>
     </div>
   </div>
 </div>
@@ -473,6 +505,8 @@ ${COMMON_CSS}
       render(); updateBadge();
     } else if (msg.type === 'created') {
       location.href = '/terminal?id=' + msg.session.id;
+    } else if (msg.type === 'error') {
+      alert(msg.message);
     }
   }
 
@@ -486,45 +520,88 @@ ${COMMON_CSS}
   }
 
   function updateBadge() {
-    var count = Object.values(allSessions).filter(function(s) { return s.waiting; }).length;
+    var count = Object.values(allSessions).filter(function(s) { return s.waiting && !s.archived; }).length;
     var $badge = document.getElementById('badge');
     $badge.textContent = count;
     $badge.classList.toggle('show', count > 0);
   }
 
+  function sendAction(type, id) {
+    if (ws && ws.readyState === 1) ws.send(NUL + JSON.stringify({ type: type, id: id }));
+  }
+
+  function buildCard(s, isArchived) {
+    var el = document.createElement('div');
+    el.className = 'card';
+    var dotClass = s.waiting ? 'waiting' : (s.active ? 'on' : '');
+    var tag = '';
+    if (s.source === 'monitor') {
+      tag = s.proxyConnected
+        ? '<span class="card-tag dialog">对话</span>'
+        : '<span class="card-tag">监控</span>';
+    }
+    var arrow = s.source === 'monitor' ? '' : '<div class="card-arrow">›</div>';
+    el.innerHTML =
+      '<div class="card-dot ' + dotClass + '"></div>' +
+      '<div class="card-body">' +
+        '<div class="card-name">' + esc(displayName(s)) + tag + '</div>' +
+        '<div class="card-preview">' + esc(s.preview || '—') + '</div>' +
+      '</div>' +
+      '<div class="card-meta">' +
+        '<div class="card-time">' + ago(s.lastActivity) + '</div>' +
+        '<div class="card-actions">' +
+          '<button class="edit-btn" title="重命名">✏️</button>' +
+          (isArchived
+            ? '<button class="card-act-btn" title="恢复">♻️</button>'
+            : '<button class="card-act-btn" title="归档">📦</button>') +
+          '<button class="card-act-btn" title="删除">🗑</button>' +
+        '</div>' +
+        arrow +
+      '</div>';
+    el.querySelector('.edit-btn').onclick = function(e) { e.stopPropagation(); renameSession(s); };
+    var actBtns = el.querySelectorAll('.card-act-btn');
+    if (isArchived) {
+      actBtns[0].onclick = function(e) { e.stopPropagation(); sendAction('unarchive', s.id); };
+      actBtns[1].onclick = function(e) { e.stopPropagation(); if (confirm('确定删除？')) sendAction('delete', s.id); };
+    } else {
+      actBtns[0].onclick = function(e) { e.stopPropagation(); sendAction('archive', s.id); };
+      actBtns[1].onclick = function(e) { e.stopPropagation(); if (confirm('确定删除？')) sendAction('delete', s.id); };
+    }
+    el.onclick = function() { location.href = '/terminal?id=' + s.id; };
+    return el;
+  }
+
   function render() {
-    var entries = Object.values(allSessions).sort(function(a, b) {
+    var all = Object.values(allSessions).sort(function(a, b) {
       return b.lastActivity - a.lastActivity;
     });
-    if (!entries.length) {
-      $list.innerHTML = '';
-      $list.appendChild($empty);
+    var active = all.filter(function(s) { return !s.archived; });
+    var archived = all.filter(function(s) { return s.archived; });
+
+    var $active = document.getElementById('activeList');
+    var $archSec = document.getElementById('archiveSection');
+    var $archList = document.getElementById('archiveList');
+    var $archCount = document.getElementById('archiveCount');
+
+    if (!all.length) {
+      $active.innerHTML = '';
+      $archSec.classList.add('hidden');
       $empty.classList.remove('hidden');
       return;
     }
     $empty.classList.add('hidden');
-    $list.innerHTML = '';
-    entries.forEach(function(s) {
-      var el = document.createElement('div');
-      el.className = 'card';
-      var dotClass = s.waiting ? 'waiting' : (s.active ? 'on' : '');
-      var tag = s.source === 'monitor' ? '<span class="card-tag">监控</span>' : '';
-      var arrow = s.source === 'monitor' ? '' : '<div class="card-arrow">›</div>';
-      el.innerHTML =
-        '<div class="card-dot ' + dotClass + '"></div>' +
-        '<div class="card-body">' +
-          '<div class="card-name">' + esc(displayName(s)) + tag + '</div>' +
-          '<div class="card-preview">' + esc(s.preview || '—') + '</div>' +
-        '</div>' +
-        '<div class="card-meta">' +
-          '<div class="card-time">' + ago(s.lastActivity) + '</div>' +
-          '<button class="edit-btn" title="重命名">✏️</button>' +
-          arrow +
-        '</div>';
-      el.querySelector('.edit-btn').onclick = function(e) { e.stopPropagation(); renameSession(s); };
-      el.onclick = function() { location.href = '/terminal?id=' + s.id; };
-      $list.appendChild(el);
-    });
+
+    $active.innerHTML = '';
+    active.forEach(function(s) { $active.appendChild(buildCard(s, false)); });
+
+    if (archived.length) {
+      $archSec.classList.remove('hidden');
+      $archCount.textContent = '(' + archived.length + ')';
+      $archList.innerHTML = '';
+      archived.forEach(function(s) { $archList.appendChild(buildCard(s, true)); });
+    } else {
+      $archSec.classList.add('hidden');
+    }
   }
 
   function ago(ts) {
@@ -540,6 +617,13 @@ ${COMMON_CSS}
 
   document.getElementById('newBtn').onclick = function() {
     if (ws && ws.readyState === 1) ws.send(NUL + JSON.stringify({ type: 'create' }));
+  };
+
+  document.getElementById('archiveToggle').onclick = function() {
+    var $list = document.getElementById('archiveList');
+    var $arrow = document.getElementById('archiveArrow');
+    $list.classList.toggle('open');
+    $arrow.classList.toggle('open');
   };
 
   connect();
@@ -724,11 +808,15 @@ ${COMMON_CSS}
           if (msg.type === 'joined') {
             var storedTitle = termTitles[sessionId];
             applyTitle(storedTitle || msg.session.name);
-            if (msg.session.source === 'monitor' && !msg.session.proxyConnected) {
-              term.options.disableStdin = true;
-              document.getElementById('renameBtn').style.display = 'none';
-              document.getElementById('qbar').innerHTML =
-                '<span style="color:var(--text-dim);font-size:12px;padding:6px 4px;">只读监控 · 在 iTerm2 中操作</span>';
+            if (msg.session.source === 'monitor') {
+              if (msg.session.proxyConnected) {
+                // Interactive proxy session — keep input enabled
+              } else {
+                term.options.disableStdin = true;
+                document.getElementById('renameBtn').style.display = 'none';
+                document.getElementById('qbar').innerHTML =
+                  '<span style="color:var(--text-dim);font-size:12px;padding:6px 4px;">只读监控 · 在 iTerm2 中操作</span>';
+              }
             }
           }
           if (msg.type === 'session_update' && msg.session.id === sessionId) {
@@ -832,7 +920,7 @@ wss.on("connection", (ws) => {
   ws.on("message", (raw) => {
     const str = raw.toString();
     if (str.charCodeAt(0) === 0) {
-      try { handleControl(ws, JSON.parse(str.slice(1))); } catch (_) {}
+      try { handleControl(ws, JSON.parse(str.slice(1))); } catch (e) { console.error("handleControl error:", e); }
       return;
     }
     const sid = clientSessions.get(ws);
@@ -903,7 +991,10 @@ function handleControl(ws, ctrl) {
 
     case "create": {
       if (NO_PTY) {
-        if (!_hostWs || _hostWs.readyState !== 1) break;
+        if (!_hostWs || _hostWs.readyState !== 1) {
+          ws.send("\x00" + JSON.stringify({ type: "error", message: "ccrd 未连接，请先在宿主机运行 ccrd" }));
+          break;
+        }
         const hookSid = "host-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
         const m = getOrCreateMonitor(hookSid);
         m.name = ctrl.name || "Shell " + hookSid.slice(-4);
@@ -996,6 +1087,57 @@ function handleControl(ws, ctrl) {
       if (s && ctrl.name) {
         s.name = String(ctrl.name).slice(0, 50);
         broadcastCtrl({ type: "session_update", session: s.source === "monitor" ? monitorInfo(s) : sessionInfo(s) });
+      }
+      break;
+    }
+
+    case "delete": {
+      const id = ctrl.id;
+      if (!id) break;
+      // Try PTY session
+      const s = sessions.get(id);
+      if (s) {
+        if (s.ptyProcess) { try { s.ptyProcess.kill(); } catch (_) {} }
+        if (s._updateTimer) clearTimeout(s._updateTimer);
+        s.clients.forEach((c) => { clientSessions.delete(c); });
+        sessions.delete(id);
+        broadcastCtrl({ type: "sessions", data: getSessionList() });
+        break;
+      }
+      // Try monitor session
+      const m = findMonitorById(id);
+      if (m) {
+        if (m._proxyWs && m._proxyWs.readyState === 1) {
+          try { m._proxyWs.close(); } catch (_) {}
+        }
+        m.clients.forEach((c) => { clientSessions.delete(c); });
+        // Find hookSid key in monitors map
+        for (const [key, val] of monitors) {
+          if (val === m) { monitors.delete(key); break; }
+        }
+        broadcastCtrl({ type: "sessions", data: getSessionList() });
+      }
+      break;
+    }
+
+    case "archive": {
+      const id = ctrl.id;
+      if (!id) break;
+      const s = sessions.get(id) || findMonitorById(id);
+      if (s) {
+        s.archived = true;
+        broadcastCtrl({ type: "sessions", data: getSessionList() });
+      }
+      break;
+    }
+
+    case "unarchive": {
+      const id = ctrl.id;
+      if (!id) break;
+      const s = sessions.get(id) || findMonitorById(id);
+      if (s) {
+        s.archived = false;
+        broadcastCtrl({ type: "sessions", data: getSessionList() });
       }
       break;
     }
