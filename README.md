@@ -7,22 +7,23 @@ Monitor and control Claude Code tasks from your phone or browser in real time.
 
 ## Install
 
+### macOS Menu Bar App (Recommended)
+
+Download [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — a signed & notarized macOS menu bar app. One click to start/stop the server, view session count, and configure port/work directory. No terminal needed.
+
+1. Open the DMG and drag to Applications
+2. Launch — a terminal icon appears in the menu bar
+3. Click the icon → **Start Server**
+4. Open `http://localhost:3456` in your browser or phone (same WiFi)
+
+### Command Line
+
 ```bash
 npm install
 
 # macOS Apple Silicon — run once after npm install
 chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
-```
 
-## Quick Start
-
-### macOS Menu Bar App
-
-Download [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — a signed & notarized macOS menu bar app to start/stop the server with one click. No terminal needed.
-
-### Local
-
-```bash
 npm start
 # or with custom port/directory
 PORT=8080 CC_WORK_DIR=/path/to/project npm start

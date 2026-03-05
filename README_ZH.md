@@ -7,22 +7,23 @@
 
 ## 安装
 
+### macOS 菜单栏 App（推荐）
+
+下载 [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — 已签名公证的 macOS 菜单栏应用，一键启动/停止服务器，查看会话数，配置端口和工作目录，无需终端。
+
+1. 打开 DMG，拖入应用程序
+2. 启动 — 菜单栏出现终端图标
+3. 点击图标 → **启动服务器**
+4. 浏览器或手机打开 `http://localhost:3456`（需同一 WiFi）
+
+### 命令行
+
 ```bash
 npm install
 
 # macOS Apple Silicon 需要额外执行一次（npm install 之后）
 chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
-```
 
-## 启动
-
-### macOS 菜单栏 App
-
-下载 [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — 已签名公证的 macOS 菜单栏应用，一键启动/停止服务器，无需终端。
-
-### 命令行
-
-```bash
 npm start
 # 或自定义端口/目录
 PORT=8080 CC_WORK_DIR=/path/to/project npm start
