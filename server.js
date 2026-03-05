@@ -374,7 +374,8 @@ ${COMMON_CSS}
   .card:active { background:var(--surface); }
   .card-dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); flex-shrink:0; }
   .card-dot.on { background:var(--green); animation:pulse 2s infinite; }
-  .card-dot.waiting { background:#ff9100; animation:pulse 0.8s infinite; }
+  .card-dot.waiting { background:#ff9100; animation:pulse 0.8s infinite;
+    box-shadow:0 0 6px 2px rgba(255,145,0,.6); }
   .card-tag { font-size:10px; background:var(--surface2); color:var(--text-dim);
     padding:1px 6px; border-radius:4px; margin-left:4px; vertical-align:middle; }
   .card-body { flex:1; min-width:0; }
@@ -416,6 +417,7 @@ ${COMMON_CSS}
     <span class="header-title">CC Remote</span>
     <div class="conn-dot" id="dot"></div>
     <span class="badge" id="badge"></span>
+    <button id="soundBtn" style="background:none;border:none;font-size:18px;cursor:pointer;padding:4px;" onclick="toggleSound()"></button>
     <button class="btn-new" id="newBtn">+ 新建</button>
   </div>
   <div style="padding:8px 16px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--border);font-family:monospace;display:flex;align-items:center;gap:6px;flex-shrink:0;">
@@ -510,7 +512,34 @@ ${COMMON_CSS}
     }
   }
 
+  function playDing() {
+    try {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.5);
+    } catch(e) {}
+  }
+
+  var soundOn = localStorage.getItem('cc-sound') !== '0';
+  var $soundBtn = document.getElementById('soundBtn');
+  $soundBtn.textContent = soundOn ? '🔔' : '🔕';
+  window.toggleSound = function() {
+    soundOn = !soundOn;
+    localStorage.setItem('cc-sound', soundOn ? '1' : '0');
+    $soundBtn.textContent = soundOn ? '🔔' : '🔕';
+  };
+
   function notify(name) {
+    if (soundOn) playDing();
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification('CC Remote — 需要输入', { body: name, silent: false });
     }
@@ -664,10 +693,12 @@ ${COMMON_CSS}
     cursor:pointer; padding:2px 6px; color:var(--text-dim); opacity:0.5;
     flex-shrink:0; line-height:1; }
   .rename-btn:active { opacity:1; }
-  .waiting-banner { background:#ff9100; color:#0a0a0f; text-align:center;
+  .waiting-banner { background:linear-gradient(90deg,#ff9100,#ffb347,#ff9100,#ffb347);
+    background-size:300% 100%; color:#0a0a0f; text-align:center;
     padding:8px 16px; font-size:13px; font-weight:600; flex-shrink:0;
-    animation:pulse 0.8s infinite; display:flex; align-items:center;
+    animation:shimmer 2s linear infinite; display:flex; align-items:center;
     justify-content:center; gap:8px; }
+  @keyframes shimmer { 0%{background-position:100% 0} 100%{background-position:-100% 0} }
 </style>
 </head>
 <body>
@@ -758,10 +789,29 @@ ${COMMON_CSS}
     $qbar.appendChild(btn);
   });
 
+  // ── Sound ──
+  function playDing() {
+    try {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.5);
+    } catch(e) {}
+  }
+
   // ── Waiting state ──
   function setWaiting(waiting) {
     var existing = document.getElementById('waitingBanner');
     if (waiting && !existing) {
+      if (localStorage.getItem('cc-sound') !== '0') playDing();
       var banner = document.createElement('div');
       banner.id = 'waitingBanner';
       banner.className = 'waiting-banner';
