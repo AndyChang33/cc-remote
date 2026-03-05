@@ -892,6 +892,16 @@ const server = http.createServer((req, res) => {
       res.writeHead(200);
       res.end("ok");
     });
+  } else if (path === "/api/discover") {
+    const sessionCount = sessions.size + monitors.size;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      name: "CC Remote",
+      hostname: os.hostname(),
+      platform: process.platform,
+      port: Number(PORT),
+      sessions: sessionCount,
+    }));
   } else {
     res.writeHead(404);
     res.end("Not found");

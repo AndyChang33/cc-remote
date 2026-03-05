@@ -16,6 +16,12 @@ chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
 
 ## 启动
 
+### macOS 菜单栏 App
+
+下载 [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — 已签名公证的 macOS 菜单栏应用，一键启动/停止服务器，无需终端。
+
+### 命令行
+
 ```bash
 npm start
 # 或自定义端口/目录

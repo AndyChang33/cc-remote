@@ -16,6 +16,10 @@ chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper
 
 ## Quick Start
 
+### macOS Menu Bar App
+
+Download [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — a signed & notarized macOS menu bar app to start/stop the server with one click. No terminal needed.
+
 ### Local
 
 ```bash
