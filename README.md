@@ -9,7 +9,7 @@ Monitor and control Claude Code tasks from your phone or browser in real time.
 
 ### macOS Menu Bar App (Recommended)
 
-Download [CCRemoteServer-v1.0.0.dmg](build/CCRemoteServer-v1.0.0.dmg) — a signed & notarized macOS menu bar app. One click to start/stop the server, view session count, and configure port/work directory. No terminal needed.
+Download [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/releases/download/v1.1.0/CCRemoteServer-v1.1.0.dmg) — a macOS menu bar app. One click to start/stop the server, view usage cost, and configure port/work directory. Sandbox mode restricts remote terminals to a safe directory. No terminal needed.
 
 1. Open the DMG and drag to Applications
 2. Launch — a terminal icon appears in the menu bar
@@ -77,7 +77,7 @@ Event log format:
 - `Write` — file path + content preview
 - `Notification` — Claude's prompt messages
 - `UserPromptSubmit` — user instructions
-- `Stop` — task completed
+- `Stop` — task completed + cost/token summary
 
 ### 3. Proxy Mode via `ccr` (Recommended)
 
@@ -204,6 +204,8 @@ ccd-stop         # Docker: stop container
 | `CC_WORK_DIR` | `$HOME` | Initial working directory for PTY sessions |
 | `CC_REMOTE_URL` | `ws://localhost:3456/ws` | Server URL for ccr.js / ccrd.js |
 | `NO_PTY` | `0` | Set to `1` to disable local PTY (Docker mode) |
+| `SANDBOX` | `0` | Set to `1` to restrict remote terminals to sandbox directory |
+| `SANDBOX_DIR` | `~/.cc-remote/sandbox` | Sandbox directory path |
 | `SHELL` | System default | Shell to spawn for PTY sessions |
 
 ## License

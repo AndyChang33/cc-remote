@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important: server.js 部署
+
+修改 `server.js` 后必须同步到两个位置：
+1. 项目目录：`./server.js`（开发用）
+2. 安装目录：`~/.cc-remote/server.js`（CCRemoteServer 菜单栏 app 实际运行的）
+
+```bash
+cp server.js ~/.cc-remote/server.js
+```
+
+然后在菜单栏 app 里 Restart Server 生效。
+
+## Git Repos
+
+本项目包含三个独立 git 仓库：
+- `./` — cc-remote 主仓库（server.js + scripts）→ `AndyChang33/cc-remote`
+- `./CCRemote/` — iOS 客户端 App，独立 git 仓库
+- `./CCRemoteServer/` — macOS 菜单栏 App，独立 git 仓库
+
+`.gitignore` 已排除 `CCRemote/` 和 `CCRemoteServer/`，各自独立提交。
+
 ## Commands
 
 ### Local (直接运行)

@@ -2,12 +2,16 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 const pty = require("node-pty");
 const os = require("os");
+const fs = require("fs");
+const path = require("path");
 const { spawn } = require("child_process");
 
 const PORT = process.env.PORT || 3456;
 const WORK_DIR = process.env.CC_WORK_DIR || os.homedir();
 const SHELL = process.env.SHELL || "zsh";
 const NO_PTY = process.env.NO_PTY === "1";
+const SANDBOX = process.env.SANDBOX === "1";
+const SANDBOX_DIR = process.env.SANDBOX_DIR || path.join(os.homedir(), ".cc-remote", "sandbox");
 const MAX_SCROLLBACK = 200_000;
 
 // Host bridge (ccrd.js on the host connects here)
@@ -41,13 +45,88 @@ function createSession(name) {
   return s;
 }
 
+function sandboxProfile() {
+  const home = os.homedir();
+  // Deny all file access by default, only allow sandbox dir + essential system paths
+  return `(version 1)
+(deny default)
+(allow process*)
+(allow signal)
+(allow sysctl*)
+(allow mach*)
+(allow ipc*)
+(allow network*)
+(allow system*)
+(allow file-read* file-write*
+  (subpath "${SANDBOX_DIR}")
+)
+(allow file-read* file-write*
+  (subpath "/tmp")
+  (subpath "/private/tmp")
+  (subpath "/dev")
+)
+(allow file-read*
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/etc")
+  (subpath "/private/etc")
+  (subpath "/private/var")
+  (subpath "/var")
+  (subpath "/Library")
+  (subpath "/System")
+  (subpath "/opt")
+  (subpath "/nix")
+  (subpath "/Applications")
+  (literal "/")
+  (literal "${home}")
+  (literal "${home}/.zshrc")
+  (literal "${home}/.zshenv")
+  (literal "${home}/.zprofile")
+  (literal "${home}/.bash_profile")
+  (literal "${home}/.bashrc")
+  (literal "${home}/.profile")
+  (literal "${home}/.hushlogin")
+  (subpath "${home}/.cargo")
+  (subpath "${home}/.config")
+  (subpath "${home}/.local")
+  (subpath "${home}/.nvm")
+  (subpath "${home}/.npm")
+  (subpath "${home}/.oh-my-zsh")
+  (subpath "${home}/.zsh")
+)`;
+}
+
 function startPty(s, cols = 120, rows = 40) {
-  s.ptyProcess = pty.spawn(SHELL, [], {
+  const cwd = SANDBOX ? SANDBOX_DIR : WORK_DIR;
+  if (SANDBOX) {
+    try { fs.mkdirSync(SANDBOX_DIR, { recursive: true }); } catch (_) {}
+  }
+  const cmd = SANDBOX ? "/usr/bin/sandbox-exec" : SHELL;
+  const args = SANDBOX ? ["-p", sandboxProfile(), SHELL] : [];
+  // Write a cd-restricting .zshrc into sandbox dir
+  if (SANDBOX) {
+    const zshrc = `# Sandbox restricted shell
+SANDBOX_ROOT="${SANDBOX_DIR}"
+cd() {
+  builtin cd "$@" 2>/dev/null || { echo "sandbox: 禁止访问" >&2; return 1; }
+  case "$(pwd -P)/" in
+    "$SANDBOX_ROOT"/*|"$SANDBOX_ROOT") ;;
+    *) builtin cd "$SANDBOX_ROOT"; echo "sandbox: 只能在沙盒目录内操作" >&2; return 1;;
+  esac
+}
+pushd() { cd "$@"; }
+popd() { builtin popd "$@" 2>/dev/null && cd .; }
+`;
+    try { fs.writeFileSync(path.join(SANDBOX_DIR, ".zshrc"), zshrc); } catch (_) {}
+  }
+  s.ptyProcess = pty.spawn(cmd, args, {
     name: "xterm-256color",
     cols,
     rows,
-    cwd: WORK_DIR,
-    env: { ...process.env, CLAUDECODE: undefined },
+    cwd,
+    env: { ...process.env, CLAUDECODE: undefined,
+      ...(SANDBOX ? { ZDOTDIR: SANDBOX_DIR, HOME: SANDBOX_DIR } : {}) },
   });
 
   s.ptyProcess.onData((data) => {
@@ -217,11 +296,47 @@ function fmtEvent(data) {
       const body = shown.map(l => `\r\n    ${dim}${l.slice(0, 160)}${reset}`).join("");
       return `\r\n  ${dim}↳${reset}` + body + more;
     }
-    case "Stop":
-      return `\r\n${dim}[${t}]${reset} ${green}✓ 任务结束${reset}\r\n${dim}${"─".repeat(40)}${reset}`;
+    case "Stop": {
+      let usageLine = "";
+      const c = data._parsedCost;
+      if (c && typeof c.total_cost_usd === "number") {
+        const inK = c.input_tokens ? Math.round(c.input_tokens / 1000) + "k in" : "";
+        const outK = c.output_tokens ? Math.round(c.output_tokens / 1000) + "k out" : "";
+        const tokens = [inK, outK].filter(Boolean).join(" / ");
+        usageLine = `\r\n${dim}  💰 $${c.total_cost_usd.toFixed(4)} · ${tokens}${reset}`;
+      }
+      return `\r\n${dim}[${t}]${reset} ${green}✓ 任务结束${reset}${usageLine}\r\n${dim}${"─".repeat(40)}${reset}`;
+    }
     default:
       return "";
   }
+}
+
+// Token pricing (per million tokens, USD) — Claude Opus 4
+const TOKEN_PRICING = { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 };
+
+function parseTranscriptUsage(transcriptPath) {
+  try {
+    const content = fs.readFileSync(transcriptPath, "utf8");
+    const lines = content.trim().split("\n");
+    let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheWrite = 0;
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        const u = entry?.message?.usage;
+        if (!u) continue;
+        totalIn += (u.input_tokens || 0);
+        totalOut += (u.output_tokens || 0);
+        totalCacheRead += (u.cache_read_input_tokens || 0);
+        totalCacheWrite += (u.cache_creation_input_tokens || 0);
+      } catch (_) {}
+    }
+    const cost = (totalIn * TOKEN_PRICING.input + totalOut * TOKEN_PRICING.output +
+      totalCacheRead * TOKEN_PRICING.cacheRead + totalCacheWrite * TOKEN_PRICING.cacheWrite) / 1_000_000;
+    return { input_tokens: totalIn, output_tokens: totalOut,
+      cache_read_tokens: totalCacheRead, cache_write_tokens: totalCacheWrite,
+      total_cost_usd: cost };
+  } catch (_) { return null; }
 }
 
 function monitorInfo(m) {
@@ -236,6 +351,7 @@ function monitorInfo(m) {
     preview: m.preview,
     proxyConnected: !!(m._proxyWs && m._proxyWs.readyState === 1),
     archived: m.archived || false,
+    cost: m.cost || null,
   };
 }
 
@@ -244,6 +360,16 @@ function handleHook(data) {
   if (!hookSid) return;
   const m = getOrCreateMonitor(hookSid);
   m.lastActivity = Date.now();
+  // Parse usage from transcript file (throttled: at most once per 5s)
+  if (data.transcript_path) {
+    m._transcriptPath = data.transcript_path;
+    const now = Date.now();
+    if (!m._lastUsageParse || now - m._lastUsageParse > 5000) {
+      m._lastUsageParse = now;
+      const usage = parseTranscriptUsage(data.transcript_path);
+      if (usage) m.cost = usage;
+    }
+  }
   switch (data.hook_event_name) {
     case "PreToolUse": {
       const tool = data.tool_name || "Tool";
@@ -277,6 +403,13 @@ function handleHook(data) {
       break;
     }
     case "Stop":
+      // Force re-parse usage on Stop (ignore throttle)
+      if (m._transcriptPath) {
+        const usage = parseTranscriptUsage(m._transcriptPath);
+        if (usage) m.cost = usage;
+        m._lastUsageParse = Date.now();
+      }
+      data._parsedCost = m.cost;
       m.preview = "✅ 等待下一步指令";
       m.waiting = true;
       break;
@@ -382,6 +515,7 @@ ${COMMON_CSS}
   .card-name { font-weight:600; font-size:14px; margin-bottom:3px; }
   .card-preview { font-family:monospace; font-size:12px; color:var(--text-dim);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card-usage { font-size:11px; color:var(--accent); margin-top:2px; opacity:0.8; }
   .card-meta { text-align:right; flex-shrink:0; }
   .card-time { font-size:11px; color:var(--text-dim); margin-bottom:4px; }
   .card-arrow { font-size:18px; color:var(--text-dim); }
@@ -570,11 +704,19 @@ ${COMMON_CSS}
         : '<span class="card-tag">监控</span>';
     }
     var arrow = s.source === 'monitor' ? '' : '<div class="card-arrow">›</div>';
+    var usageLine = '';
+    if (s.cost && typeof s.cost.total_cost_usd === 'number' && s.cost.total_cost_usd > 0) {
+      var inK = s.cost.input_tokens ? Math.round(s.cost.input_tokens / 1000) + 'k' : '';
+      var outK = s.cost.output_tokens ? Math.round(s.cost.output_tokens / 1000) + 'k' : '';
+      var tokens = inK && outK ? ' · ' + inK + ' in / ' + outK + ' out' : '';
+      usageLine = '<div class="card-usage">💰 $' + s.cost.total_cost_usd.toFixed(3) + tokens + '</div>';
+    }
     el.innerHTML =
       '<div class="card-dot ' + dotClass + '"></div>' +
       '<div class="card-body">' +
         '<div class="card-name">' + esc(displayName(s)) + tag + '</div>' +
         '<div class="card-preview">' + esc(s.preview || '—') + '</div>' +
+        usageLine +
       '</div>' +
       '<div class="card-meta">' +
         '<div class="card-time">' + ago(s.lastActivity) + '</div>' +
@@ -711,6 +853,7 @@ ${COMMON_CSS}
     <div class="logo">CC</div>
     <span class="header-title" id="sessionName">Terminal</span>
     <button class="rename-btn" id="renameBtn" title="重命名">✏️</button>
+    <span id="usageInfo" style="font-size:11px;color:var(--accent);opacity:0.8;margin-left:auto;margin-right:8px;white-space:nowrap;"></span>
     <div class="conn-dot" id="dot"></div>
   </div>
   <div id="term"></div>
@@ -825,6 +968,14 @@ ${COMMON_CSS}
     }
   }
 
+  // ── Usage display ──
+  var $usage = document.getElementById('usageInfo');
+  function updateUsage(s) {
+    if (s.cost && typeof s.cost.total_cost_usd === 'number' && s.cost.total_cost_usd > 0) {
+      $usage.textContent = '$' + s.cost.total_cost_usd.toFixed(3);
+    }
+  }
+
   // ── WebSocket ──
   var ws;
 
@@ -877,6 +1028,7 @@ ${COMMON_CSS}
           }
           if (msg.type === 'session_update' && msg.session.id === sessionId) {
             setWaiting(msg.session.waiting);
+            updateUsage(msg.session);
           }
           if (msg.type === 'error') location.href = '/';
         } catch(_) {}
@@ -938,12 +1090,31 @@ const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
-      try { handleHook(JSON.parse(body)); } catch (_) {}
+      try {
+        handleHook(JSON.parse(body));
+      } catch (_) {}
       res.writeHead(200);
       res.end("ok");
     });
   } else if (path === "/api/discover") {
     const sessionCount = sessions.size + monitors.size;
+    // Aggregate cost/usage across all active monitors
+    let totalCost = 0;
+    let waitingCount = 0;
+    const monitorSummaries = [];
+    for (const m of monitors.values()) {
+      if (m.archived) continue;
+      if (m.waiting) waitingCount++;
+      if (m.cost && typeof m.cost.total_cost_usd === "number") {
+        totalCost += m.cost.total_cost_usd;
+      }
+      monitorSummaries.push({
+        id: m.id,
+        name: m.name,
+        waiting: m.waiting,
+        cost: m.cost || null,
+      });
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       name: "CC Remote",
@@ -951,6 +1122,9 @@ const server = http.createServer((req, res) => {
       platform: process.platform,
       port: Number(PORT),
       sessions: sessionCount,
+      totalCostUsd: totalCost,
+      waitingCount: waitingCount,
+      monitors: monitorSummaries,
     }));
   } else {
     res.writeHead(404);
