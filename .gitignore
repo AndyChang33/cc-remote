@@ -1,5 +1,6 @@
 node_modules/
 .claude/
+build/
 CCRemote/
 CCRemoteServer/
 CCMobile/
