@@ -9,7 +9,7 @@
 
 ### macOS 菜单栏 App（推荐）
 
-下载 [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/releases/download/v1.1.0/CCRemoteServer-v1.1.0.dmg) — macOS 菜单栏应用，一键启动/停止服务器，查看用量费用，配置端口和工作目录。沙盒模式限制远程终端只能在安全目录内操作。无需终端。
+下载 [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/raw/main/assets/CCRemoteServer-v1.1.0.dmg) — macOS 菜单栏应用，一键启动/停止服务器，查看用量费用，配置端口和工作目录。沙盒模式限制远程终端只能在安全目录内操作。无需终端。
 
 1. 打开 DMG，拖入应用程序
 2. 启动 — 菜单栏出现终端图标

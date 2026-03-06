@@ -9,7 +9,7 @@ Monitor and control Claude Code tasks from your phone or browser in real time.
 
 ### macOS Menu Bar App (Recommended)
 
-Download [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/releases/download/v1.1.0/CCRemoteServer-v1.1.0.dmg) — a macOS menu bar app. One click to start/stop the server, view usage cost, and configure port/work directory. Sandbox mode restricts remote terminals to a safe directory. No terminal needed.
+Download [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/raw/main/assets/CCRemoteServer-v1.1.0.dmg) — a macOS menu bar app. One click to start/stop the server, view usage cost, and configure port/work directory. Sandbox mode restricts remote terminals to a safe directory. No terminal needed.
 
 1. Open the DMG and drag to Applications
 2. Launch — a terminal icon appears in the menu bar
