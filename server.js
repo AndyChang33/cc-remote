@@ -4,9 +4,10 @@ const pty = require("node-pty");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
-const { spawn } = require("child_process");
+const cp = require("child_process");
+const { spawn } = cp;
 
-const PORT = process.env.PORT || 3456;
+const PORT = parseInt(process.env.PORT) || 3456;
 const WORK_DIR = process.env.CC_WORK_DIR || os.homedir();
 const SHELL = process.env.SHELL || "zsh";
 const NO_PTY = process.env.NO_PTY === "1";
@@ -16,6 +17,100 @@ const MAX_SCROLLBACK = 200_000;
 
 // Host bridge (ccrd.js on the host connects here)
 let _hostWs = null;
+
+// Pending hook approvals: monitorId → { res, timer }
+const pendingApprovals = new Map();
+
+// ── Claude permissions (mirror CC's auto-approve logic) ──────────────────────
+// Tools that CC never prompts for — always auto-approve on mobile too
+const READONLY_TOOLS = new Set([
+  "Read", "Grep", "Glob", "WebSearch", "WebFetch",
+  "Agent", "Explore", "Plan", "TodoRead", "TodoWrite",
+  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+  "LSP", "AskUserQuestion", "ToolSearch", "Skill",
+  "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
+  "NotebookRead", "SendMessage", "CronList",
+]);
+
+let _globalRules = [];  // [{ tool, pattern }, ...]
+const _projectRulesCache = new Map(); // projectDir → { rules, ts }
+
+function parseAllowRules(settingsPath) {
+  try {
+    const raw = fs.readFileSync(settingsPath, "utf8");
+    const settings = JSON.parse(raw);
+    const allow = (settings.permissions && settings.permissions.allow) || [];
+    return allow.map((rule) => {
+      const m = rule.match(/^(\w+)\((.+)\)$/);
+      if (m) return { tool: m[1], pattern: m[2] };
+      return { tool: rule, pattern: "*" };
+    });
+  } catch (_) { return []; }
+}
+
+function loadClaudePermissions() {
+  _globalRules = parseAllowRules(path.join(os.homedir(), ".claude", "settings.json"));
+}
+
+// Derive project dir from transcript_path (e.g. ~/.claude/projects/-Users-x-code-foo/...)
+// Greedy decode: at each '-', check if the prefix is a real directory
+function getProjectDir(transcriptPath) {
+  if (!transcriptPath) return null;
+  const m = transcriptPath.match(/\.claude\/projects\/([^/]+)/);
+  if (!m) return null;
+  const segments = m[1].split("-").filter(Boolean);
+  let current = "", acc = "";
+  for (const seg of segments) {
+    acc = acc ? acc + "-" + seg : seg;
+    const tryPath = current + "/" + acc;
+    try { if (fs.statSync(tryPath).isDirectory()) { current = tryPath; acc = ""; } } catch (_) {}
+  }
+  if (acc) current += "/" + acc;
+  try { if (fs.statSync(current).isDirectory()) return current; } catch (_) {}
+  return null;
+}
+
+function getProjectRules(projectDir) {
+  if (!projectDir) return [];
+  const cached = _projectRulesCache.get(projectDir);
+  if (cached && Date.now() - cached.ts < 30000) return cached.rules;
+  const rules = [
+    ...parseAllowRules(path.join(projectDir, ".claude", "settings.json")),
+    ...parseAllowRules(path.join(projectDir, ".claude", "settings.local.json")),
+  ];
+  _projectRulesCache.set(projectDir, { rules, ts: Date.now() });
+  return rules;
+}
+
+function globMatch(pattern, str) {
+  // Simple glob: * matches any chars, ** matches path segments, ? matches one char
+  const re = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\x00")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\x00/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp("^" + re + "$").test(str);
+}
+
+function isToolAllowed(toolName, toolInput, projectDir) {
+  if (READONLY_TOOLS.has(toolName)) return true;
+  const inputVal = String(toolInput.command || toolInput.file_path || Object.values(toolInput)[0] || "");
+  const allRules = [..._globalRules, ...getProjectRules(projectDir)];
+  for (const rule of allRules) {
+    if (rule.tool !== toolName) continue;
+    if (rule.pattern === "*") return true;
+    // CC uses "prefix:*" for prefix matching (e.g. "ls:*" matches "ls /tmp")
+    if (rule.pattern.endsWith(":*")) {
+      if (inputVal.startsWith(rule.pattern.slice(0, -2))) return true;
+    } else if (globMatch(rule.pattern, inputVal)) return true;
+  }
+  return false;
+}
+
+// Load on startup, reload periodically
+loadClaudePermissions();
+setInterval(loadClaudePermissions, 30000);
 
 // Claude Code 确认提示特征：(y/n) 变体、Allow X?、Do you want to、› 结尾
 const CONFIRM_RE = /\(y\/n\)|\(Y\/n\)|\(Y\/N\)|Allow .+\?|Do you want to|\u203a\s*$/;
@@ -57,6 +152,7 @@ function sandboxProfile() {
 (allow ipc*)
 (allow network*)
 (allow system*)
+(allow file-ioctl)
 (allow file-read* file-write*
   (subpath "${SANDBOX_DIR}")
 )
@@ -129,7 +225,24 @@ popd() { builtin popd "$@" 2>/dev/null && cd .; }
       ...(SANDBOX ? { ZDOTDIR: SANDBOX_DIR, HOME: SANDBOX_DIR } : {}) },
   });
 
+  // Stall detection: if no output in 5s, Mac may be showing a permission dialog
+  s._gotFirstOutput = false;
+  s._stallTimer = setTimeout(() => {
+    if (!s._gotFirstOutput) {
+      const warn = "\r\n\x1b[33m⚠️  Shell 启动缓慢，Mac 上可能正在显示权限弹窗，请检查电脑屏幕\x1b[0m\r\n";
+      s.scrollback += warn;
+      s.clients.forEach((ws) => ws.readyState === 1 && ws.send(warn));
+      s.waiting = true;
+      s.preview = "⚠️ Mac 可能有权限弹窗";
+      scheduleUpdate(s);
+    }
+  }, 5000);
+
   s.ptyProcess.onData((data) => {
+    if (!s._gotFirstOutput) {
+      s._gotFirstOutput = true;
+      if (s._stallTimer) { clearTimeout(s._stallTimer); s._stallTimer = null; }
+    }
     s.scrollback += data;
     if (s.scrollback.length > MAX_SCROLLBACK)
       s.scrollback = s.scrollback.slice(-MAX_SCROLLBACK);
@@ -184,15 +297,82 @@ function sessionInfo(s) {
   };
 }
 
-// ── Monitor sessions (hook-based, read-only) ──────────────────────────────────
+// ── Monitor sessions (hook-based) with persistence ───────────────────────────
 
 const monitors = new Map(); // hookSessionId → monitor object
+const PERSIST_DIR = path.join(os.homedir(), ".cc-remote", "data");
+const SESSIONS_FILE = path.join(PERSIST_DIR, "sessions.json");
+const CARDS_DIR = path.join(PERSIST_DIR, "cards");
+
+// Ensure directories exist
+try { fs.mkdirSync(PERSIST_DIR, { recursive: true }); } catch (_) {}
+try { fs.mkdirSync(CARDS_DIR, { recursive: true }); } catch (_) {}
+
+// Load saved sessions on startup
+function loadSessions() {
+  try {
+    const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8"));
+    for (const [hookSid, saved] of Object.entries(data)) {
+      const m = {
+        id: saved.id,
+        name: saved.name,
+        source: "monitor",
+        waiting: false,
+        preview: saved.preview || "",
+        scrollback: "",
+        clients: new Set(),
+        ptyProcess: null,
+        createdAt: saved.createdAt || Date.now(),
+        lastActivity: saved.lastActivity || Date.now(),
+        cost: saved.cost || null,
+        archived: saved.archived || false,
+        _status: "waiting",
+        _transcriptPath: saved.transcriptPath || null,
+      };
+      monitors.set(hookSid, m);
+      // Load saved cards into scrollback for xterm fallback
+      try {
+        const cards = JSON.parse(fs.readFileSync(path.join(CARDS_DIR, hookSid + ".json"), "utf8"));
+        m._savedCards = cards;
+      } catch (_) { m._savedCards = []; }
+    }
+    console.log("[PERSIST] loaded", Object.keys(data).length, "sessions");
+  } catch (_) {}
+}
+loadSessions();
+
+function saveSessions() {
+  try {
+    const data = {};
+    for (const [hookSid, m] of monitors) {
+      data[hookSid] = {
+        id: m.id, name: m.name, preview: m.preview,
+        createdAt: m.createdAt, lastActivity: m.lastActivity,
+        cost: m.cost || null, archived: m.archived || false,
+        transcriptPath: m._transcriptPath || null,
+      };
+    }
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data));
+  } catch (e) { console.log("[PERSIST] save error:", e.message); }
+}
+
+function saveCards(hookSid, card) {
+  try {
+    const file = path.join(CARDS_DIR, hookSid + ".json");
+    let cards = [];
+    try { cards = JSON.parse(fs.readFileSync(file, "utf8")); } catch (_) {}
+    cards.push(card);
+    // Keep last 500 cards per session
+    if (cards.length > 500) cards = cards.slice(-500);
+    fs.writeFileSync(file, JSON.stringify(cards));
+  } catch (e) { console.log("[PERSIST] card save error:", e.message); }
+}
 
 function getOrCreateMonitor(hookSid) {
   if (!monitors.has(hookSid)) {
     monitors.set(hookSid, {
       id: "mon-" + hookSid,
-      name: "Claude " + hookSid.slice(0, 6),
+      name: "Session " + hookSid.slice(0, 6),
       source: "monitor",
       waiting: false,
       preview: "",
@@ -201,7 +381,9 @@ function getOrCreateMonitor(hookSid) {
       ptyProcess: null,
       createdAt: Date.now(),
       lastActivity: Date.now(),
+      _savedCards: [],
     });
+    saveSessions();
   }
   return monitors.get(hookSid);
 }
@@ -261,11 +443,14 @@ function fmtEvent(data) {
       return `\r\n${dim}[${t}]${reset} ${yellow}💬 ${data.message || "等待输入"}${reset}`;
     case "UserPromptSubmit": {
       const raw = data.prompt || "";
+      // Skip system messages
+      if (raw.match(/^<(task-notification|system-reminder)/)) return "";
       // Claude Code TUI 会把 ⏺/● 开头的 Claude 回答也带进来，截掉
       const userOnly = raw.split(/\n(?=⏺|●)/)[0];
       const lines = userOnly.split(/\r?\n/)
-        .map(l => l.replace(/^❯\s*/, "").trim())  // 去掉 shell 提示符 ❯
-        .filter(l => l);
+        .map(l => l.replace(/^❯\s*/, "").trim())
+        .filter(l => l && !l.startsWith("<task-notification") && !l.startsWith("<system-reminder"));
+      if (!lines.length) return "";
       const first = (lines[0] || "").slice(0, 200);
       const rest = lines.slice(1).map(l => `\r\n  ${green}  ${l.slice(0, 200)}${reset}`).join("");
       return `\r\n${dim}[${t}]${reset} ${green}▶ ${first}${reset}` + rest;
@@ -339,6 +524,28 @@ function parseTranscriptUsage(transcriptPath) {
   } catch (_) { return null; }
 }
 
+function parseLastResponse(transcriptPath) {
+  try {
+    const content = fs.readFileSync(transcriptPath, "utf8");
+    const lines = content.trim().split("\n");
+    // Walk backwards from end, collect assistant text until ANY user entry
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 30); i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type === "user") break;
+        if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
+          const parts = entry.message.content.filter(c => c.type === "text" && c.text?.trim());
+          if (parts.length > 0) {
+            const text = parts.map(p => p.text.trim()).join("\n");
+            return text.length > 800 ? text.slice(0, 800) + "…" : text;
+          }
+        }
+      } catch (_) {}
+    }
+    return "";
+  } catch (_) { return ""; }
+}
+
 function monitorInfo(m) {
   return {
     id: m.id,
@@ -349,9 +556,11 @@ function monitorInfo(m) {
     createdAt: m.createdAt,
     lastActivity: m.lastActivity,
     preview: m.preview,
+    status: m._status || "idle",
     proxyConnected: !!(m._proxyWs && m._proxyWs.readyState === 1),
     archived: m.archived || false,
     cost: m.cost || null,
+    pendingAction: pendingApprovals.has(m.id) ? (m._pendingAction || null) : null,
   };
 }
 
@@ -370,6 +579,47 @@ function handleHook(data) {
       if (usage) m.cost = usage;
     }
   }
+
+  // On PreToolUse/Stop: extract new assistant text from transcript and display it
+  // Extract new assistant text from transcript on every hook event
+  if (m._transcriptPath && data.hook_event_name !== "UserPromptSubmit") {
+    try {
+      const content = fs.readFileSync(m._transcriptPath, "utf8");
+      const lines = content.trim().split("\n");
+      // First time: skip history, only show new text going forward
+      if (!m._lastTranscriptLine) { m._lastTranscriptLine = lines.length; }
+      const lastIdx = m._lastTranscriptLine;
+      const newTexts = [];
+      for (let i = lastIdx; i < lines.length; i++) {
+        try {
+          const entry = JSON.parse(lines[i]);
+          if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
+            const parts = entry.message.content.filter(c => c.type === "text" && c.text?.trim()
+              && !c.text.match(/^<(task-notification|system-reminder)/));
+            for (const p of parts) newTexts.push(p.text.trim());
+          }
+        } catch (_) {}
+      }
+      m._lastTranscriptLine = lines.length;
+      if (newTexts.length > 0) {
+        const t = new Date().toTimeString().slice(0, 8);
+        const dim = "\x1b[90m", cyan = "\x1b[36m", reset = "\x1b[0m";
+        const combined = newTexts.join("\n");
+        const displayLines = combined.split("\n").slice(0, 30);
+        const truncated = combined.split("\n").length > 30 ? `\r\n  ${dim}…${reset}` : "";
+        const text = `\r\n${dim}[${t}]${reset} 💭 ${cyan}Claude:${reset}` +
+          displayLines.map(l => `\r\n  ${l.slice(0, 120)}`).join("") + truncated;
+        m.scrollback += text;
+        if (m.scrollback.length > MAX_SCROLLBACK) m.scrollback = m.scrollback.slice(-MAX_SCROLLBACK);
+        m.clients.forEach((ws) => ws.readyState === 1 && ws.send(text));
+        // Also broadcast as card event + persist
+        var claudeCard = { kind: "claude", icon: "💭", title: "Claude", body: combined.slice(0, 1000), ts: t };
+        broadcastCtrl({ type: "card_event", sessionId: m.id, card: claudeCard });
+        saveCards(hookSid, claudeCard);
+      }
+    } catch (_) {}
+  }
+
   switch (data.hook_event_name) {
     case "PreToolUse": {
       const tool = data.tool_name || "Tool";
@@ -389,17 +639,35 @@ function handleHook(data) {
         m.preview = "🔧 " + tool + (v ? ": " + String(v).slice(0, 50) : "");
       }
       m.waiting = false;
+      m._status = "running:" + tool;
+      break;
+    }
+    case "PermissionRequest": {
+      const tool = data.tool_name || "Tool";
+      const inp = data.tool_input || {};
+      if (tool === "Bash" && inp.command)
+        m.preview = "⚠️ " + inp.command.slice(0, 60);
+      else if (inp.file_path)
+        m.preview = "⚠️ " + tool + " " + inp.file_path.split("/").pop();
+      else
+        m.preview = "⚠️ " + tool + " requires approval";
+      m.waiting = true;
       break;
     }
     case "Notification":
       m.preview = "💬 " + (data.message || "等待输入");
       m.waiting = true;
+      m._status = "waiting";
       break;
+    case "PostToolUse":
     case "UserPromptSubmit": {
+      m._pendingAction = null;
+      if (data.hook_event_name === "PostToolUse") { m._status = "thinking"; break; }
       const p = (data.prompt || "").split(/\n(?=⏺|●)/)[0]
         .replace(/^❯\s*/m, "").trim();
       if (p) m.preview = "▶ " + p.slice(0, 60);
       m.waiting = false;
+      m._status = "thinking";
       break;
     }
     case "Stop":
@@ -410,8 +678,10 @@ function handleHook(data) {
         m._lastUsageParse = Date.now();
       }
       data._parsedCost = m.cost;
+      data._transcriptPath = m._transcriptPath;
       m.preview = "✅ 等待下一步指令";
       m.waiting = true;
+      m._status = "waiting";
       break;
   }
   // Append formatted event to scrollback and broadcast to connected clients
@@ -421,7 +691,70 @@ function handleHook(data) {
     if (m.scrollback.length > MAX_SCROLLBACK) m.scrollback = m.scrollback.slice(-MAX_SCROLLBACK);
     m.clients.forEach((ws) => ws.readyState === 1 && ws.send(text));
   }
-  broadcastCtrl({ type: "session_update", session: monitorInfo(m) });
+
+  // Broadcast structured card event for mobile UI + persist
+  const card = buildCardEvent(data);
+  if (card) {
+    card.ts = new Date().toTimeString().slice(0, 8);
+    broadcastCtrl({ type: "card_event", sessionId: m.id, card });
+    saveCards(hookSid, card);
+  }
+  saveSessions();
+
+  // Skip broadcast for PermissionRequest — the /hook handler will broadcast with pendingAction
+  if (data.hook_event_name !== "PermissionRequest") {
+    broadcastCtrl({ type: "session_update", session: monitorInfo(m) });
+  }
+}
+
+function buildCardEvent(data) {
+  const tool = data.tool_name || "";
+  const inp = data.tool_input || {};
+  switch (data.hook_event_name) {
+    case "PreToolUse": {
+      if (tool === "Bash" && inp.command)
+        return { kind: "tool", icon: "🔧", title: "Bash", body: inp.command.slice(0, 500) };
+      if ((tool === "Edit" || tool === "MultiEdit") && inp.file_path) {
+        let body = inp.file_path;
+        if (inp.old_string) {
+          body += "\n" + inp.old_string.slice(0, 500).split("\n").map(l => "- " + l).join("\n");
+        }
+        if (inp.new_string) {
+          body += "\n" + inp.new_string.slice(0, 500).split("\n").map(l => "+ " + l).join("\n");
+        }
+        return { kind: "tool", icon: "✏️", title: tool + " " + inp.file_path.split("/").pop(), body };
+      }
+      if (tool === "Write" && inp.file_path)
+        return { kind: "tool", icon: "📝", title: "Write " + inp.file_path.split("/").pop(), body: (inp.content || "").slice(0, 300) };
+      if (tool === "Read")
+        return { kind: "tool", icon: "📖", title: "Read", body: inp.file_path || "" };
+      const v = Object.values(inp)[0];
+      return { kind: "tool", icon: "🔧", title: tool, body: v ? String(v).slice(0, 200) : "" };
+    }
+    case "PostToolUse": {
+      if (tool === "Read" || tool === "Edit" || tool === "Write" || tool === "MultiEdit") return null;
+      const resp = data.tool_response;
+      if (!resp) return null;
+      let txt = "";
+      if (typeof resp === "object" && resp !== null) {
+        txt = ((resp.stdout || "") + "\n" + (resp.stderr || "")).trim();
+      } else { txt = String(resp).trim(); }
+      if (!txt) return null;
+      return { kind: "output", icon: "↳", title: tool + " 输出", body: txt.slice(0, 500) };
+    }
+    case "UserPromptSubmit": {
+      const raw = data.prompt || "";
+      if (raw.match(/^<(task-notification|system-reminder)/)) return null;
+      const p = raw.split(/\n(?=⏺|●)/)[0].replace(/^❯\s*/m, "").trim();
+      if (!p) return null;
+      return { kind: "user", icon: "▶", title: "用户", body: p.slice(0, 500) };
+    }
+    case "Notification":
+      return { kind: "notification", icon: "💬", title: "通知", body: data.message || "等待输入" };
+    case "Stop":
+      return null; // Don't show stop card
+    default: return null;
+  }
 }
 
 function findMonitorById(id) {
@@ -442,7 +775,19 @@ let wss;
 function broadcastCtrl(msg) {
   if (!wss) return;
   const data = "\x00" + JSON.stringify(msg);
-  wss.clients.forEach((ws) => ws.readyState === 1 && ws.send(data));
+  const now = Date.now();
+  const isUpdate = msg.type === "session_update";
+  wss.clients.forEach((ws) => {
+    if (ws.readyState !== 1) return;
+    // Skip session_update for newly connected clients still in suppress window
+    // Never suppress permission-related messages
+    if (ws._suppressUpdatesUntil && now < ws._suppressUpdatesUntil) {
+      if (msg.type === "actions" || msg.type === "actions_clear") { /* always send */ }
+      else if (isUpdate && msg.session && msg.session.pendingAction) { /* always send */ }
+      else if (isUpdate) return;
+    }
+    ws.send(data);
+  });
 }
 
 // ── Shared CSS ────────────────────────────────────────────────────────────────
@@ -841,6 +1186,30 @@ ${COMMON_CSS}
     animation:shimmer 2s linear infinite; display:flex; align-items:center;
     justify-content:center; gap:8px; }
   @keyframes shimmer { 0%{background-position:100% 0} 100%{background-position:-100% 0} }
+  .action-card { display:flex; flex-direction:column; gap:8px; padding:12px;
+    padding-bottom:max(8px,env(safe-area-inset-bottom));
+    border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .action-summary { font-size:13px; color:var(--text); font-weight:600; }
+  .action-detail { font-size:12px; color:var(--text-dim); font-family:monospace;
+    background:var(--surface2); border-radius:8px; padding:8px 10px;
+    max-height:120px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  .action-btns { display:flex; gap:10px; }
+  .abtn { flex:1; padding:12px 0; border:none; border-radius:12px; font-size:15px;
+    cursor:pointer; font-weight:600; white-space:nowrap; text-align:center; }
+  .abtn:active { transform:scale(.96); }
+  .abtn-allow { background:var(--green); color:#0a0a0f; }
+  .abtn-deny { background:rgba(255,82,82,.15); color:var(--red);
+    border:1px solid rgba(255,82,82,.35); }
+  .input-bar { display:flex; gap:8px; padding:8px 12px;
+    border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .input-bar input { flex:1; padding:10px 14px; border:1px solid var(--border);
+    border-radius:20px; background:var(--surface2); color:var(--text);
+    font-size:14px; outline:none; font-family:inherit; }
+  .input-bar input:focus { border-color:var(--accent); }
+  .input-bar button { padding:10px 18px; border:none; border-radius:20px;
+    background:var(--accent); color:#fff; font-size:14px; font-weight:600;
+    cursor:pointer; flex-shrink:0; }
+  .input-bar button:active { transform:scale(.94); opacity:0.8; }
 </style>
 </head>
 <body>
@@ -857,6 +1226,15 @@ ${COMMON_CSS}
     <div class="conn-dot" id="dot"></div>
   </div>
   <div id="term"></div>
+  <div class="action-card hidden" id="actionCard">
+    <div class="action-summary" id="actionSummary"></div>
+    <div class="action-detail hidden" id="actionDetail"></div>
+    <div class="action-btns" id="actionBtns"></div>
+  </div>
+  <div class="input-bar hidden" id="inputBar">
+    <input type="text" id="inputField" placeholder="输入消息..." autocomplete="off" />
+    <button id="inputSend">发送</button>
+  </div>
   <div class="quick-bar" id="qbar"></div>
 </div>
 <script>
@@ -880,6 +1258,7 @@ ${COMMON_CSS}
   function saveTermTitles() { try { localStorage.setItem('cc-titles', JSON.stringify(termTitles)); } catch(_) {} }
 
   var currentSessionName = 'Terminal';
+  var sessionSource = 'pty';
   function applyTitle(name) {
     currentSessionName = name;
     $name.textContent = name;
@@ -976,6 +1355,57 @@ ${COMMON_CSS}
     }
   }
 
+  // ── Actions card ──
+  var $actionCard = document.getElementById('actionCard');
+  var $actionInfo = document.getElementById('actionInfo');
+  var $actionBtns = document.getElementById('actionBtns');
+
+  var $actionSummary = document.getElementById('actionSummary');
+  var $actionDetail = document.getElementById('actionDetail');
+
+  function showActions(msg) {
+    $actionSummary.textContent = msg.summary;
+    // Show detail if available
+    if (msg.detail) {
+      $actionDetail.textContent = msg.detail;
+      $actionDetail.classList.remove('hidden');
+    } else {
+      $actionDetail.classList.add('hidden');
+    }
+    $actionBtns.innerHTML = '';
+    msg.actions.forEach(function(a) {
+      var btn = document.createElement('button');
+      btn.className = 'abtn ' + (a.style === 'danger' ? 'abtn-deny' : 'abtn-allow');
+      btn.textContent = a.label;
+      btn.onclick = function() {
+        sendCtrl({ type: 'hook_decision', sessionId: msg.sessionId, decision: a.decision });
+        hideActions();
+      };
+      $actionBtns.appendChild(btn);
+    });
+    $actionCard.classList.remove('hidden');
+    if (localStorage.getItem('cc-sound') !== '0') playDing();
+  }
+  function hideActions() {
+    $actionCard.classList.add('hidden');
+    $actionDetail.classList.add('hidden');
+  }
+
+  // ── Input bar ──
+  var $inputBar = document.getElementById('inputBar');
+  var $inputField = document.getElementById('inputField');
+  var $inputSend = document.getElementById('inputSend');
+
+  function sendInput(text) {
+    if (!text || !ws || ws.readyState !== 1) return;
+    ws.send(text + CR);
+    $inputField.value = '';
+  }
+  $inputSend.onclick = function() { sendInput($inputField.value); };
+  $inputField.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); sendInput($inputField.value); }
+  });
+
   // ── WebSocket ──
   var ws;
 
@@ -1009,15 +1439,18 @@ ${COMMON_CSS}
           if (msg.type === 'joined') {
             var storedTitle = termTitles[sessionId];
             applyTitle(storedTitle || msg.session.name);
+            sessionSource = msg.session.source;
             if (msg.session.source === 'monitor') {
-              if (msg.session.proxyConnected) {
-                // Interactive proxy session — keep input enabled
-              } else {
+              // Show input bar for monitor sessions
+              document.getElementById('inputBar').classList.remove('hidden');
+              if (!msg.session.proxyConnected) {
                 term.options.disableStdin = true;
-                document.getElementById('renameBtn').style.display = 'none';
-                document.getElementById('qbar').innerHTML =
-                  '<span style="color:var(--text-dim);font-size:12px;padding:6px 4px;">只读监控 · 在 iTerm2 中操作</span>';
               }
+            }
+            if (msg.session.waiting) setWaiting(true);
+            if (msg.session.pendingAction) {
+              showActions({ sessionId: sessionId, summary: msg.session.pendingAction.summary, tool: msg.session.pendingAction.tool,
+                actions: [{ label: '✓ Allow', decision: 'allow', style: 'primary' }, { label: '✗ Deny', decision: 'deny', style: 'danger' }] });
             }
           }
           if (msg.type === 'session_update' && msg.session.id === sessionId) {
@@ -1030,7 +1463,15 @@ ${COMMON_CSS}
             setWaiting(msg.session.waiting);
             updateUsage(msg.session);
           }
-          if (msg.type === 'error') location.href = '/';
+          if (msg.type === 'actions') showActions(msg);
+          if (msg.type === 'actions_clear') hideActions();
+          if (msg.type === 'error') {
+            // Retry join — session may not exist yet after server restart
+            setTimeout(function() {
+              if (ws && ws.readyState === 1) sendCtrl({ type:'join', id:sessionId, cols:term.cols, rows:term.rows });
+              else location.href = '/';
+            }, 2000);
+          }
         } catch(_) {}
       } else {
         term.write(str);
@@ -1086,12 +1527,140 @@ const server = http.createServer((req, res) => {
   } else if (path === "/terminal") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(TERMINAL_HTML);
+  } else if (req.method === "OPTIONS" && path.startsWith("/api/")) {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end();
+  } else if (path === "/api/generate" && req.method === "POST") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const { tweet, author, systemPrompt } = JSON.parse(body);
+        const prompt = [
+          author ? `Tweet by ${author}:` : "Tweet:",
+          tweet,
+          "",
+          systemPrompt || "Please write a reply.",
+        ].join("\n");
+
+        // Strip CLAUDECODE so claude can run inside another claude session
+        const env = { ...process.env };
+        delete env.CLAUDECODE;
+
+        const proc = spawn("claude", ["-p"], {
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        let output = "";
+        let errOut = "";
+        proc.stdout.on("data", (d) => (output += d));
+        proc.stderr.on("data", (d) => (errOut += d));
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: errOut || "claude exited with code " + code }));
+          } else {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ reply: output.trim() }));
+          }
+        });
+        proc.stdin.write(prompt);
+        proc.stdin.end();
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
   } else if (path === "/hook" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       try {
-        handleHook(JSON.parse(body));
+        const data = JSON.parse(body);
+        handleHook(data);
+
+        // Store TTY for input injection (sent via X-TTY header from hook command)
+        const ttyHeader = req.headers["x-tty"];
+        if (ttyHeader && ttyHeader !== "??" && data.session_id && monitors.has(data.session_id)) {
+          monitors.get(data.session_id)._tty = ttyHeader;
+        }
+
+        // PermissionRequest: CC is asking user for permission — hold for mobile approval
+        if (data.hook_event_name === "PermissionRequest" && data.session_id && monitors.has(data.session_id)) {
+          const tool = data.tool_name || "Tool";
+          const inp = data.tool_input || {};
+          const m = monitors.get(data.session_id);
+
+          // Build summary + detail
+          let summary = tool;
+          let detail = "";
+          if ((tool === "Edit" || tool === "MultiEdit") && inp.file_path) {
+            summary = "\u270f\ufe0f Edit " + inp.file_path.split("/").pop();
+            detail = inp.file_path;
+            if (inp.old_string) detail += "\n- " + inp.old_string.slice(0, 200);
+            if (inp.new_string) detail += "\n+ " + inp.new_string.slice(0, 200);
+          } else if (tool === "Write" && inp.file_path) {
+            summary = "\ud83d\udcdd Write " + inp.file_path.split("/").pop();
+            detail = inp.file_path + (inp.content ? "\n" + inp.content.slice(0, 300) : "");
+          } else if (tool === "Bash" && inp.command) {
+            summary = "\ud83d\udd27 Bash";
+            detail = inp.command.slice(0, 500);
+          } else {
+            const v = Object.values(inp)[0];
+            summary = "\ud83d\udd27 " + tool;
+            detail = v ? String(v).slice(0, 300) : "";
+          }
+          m._pendingAction = { tool, summary, detail };
+
+          // Only hold if any WS clients are connected (phone/web viewing)
+          const hasClients = wss && Array.from(wss.clients).some((c) => c.readyState === 1);
+          if (hasClients) {
+            const aid = m.id;
+            // Cancel previous pending
+            const prev = pendingApprovals.get(aid);
+            if (prev) { clearTimeout(prev.timer); try { prev.res.writeHead(200); prev.res.end("ok"); } catch(_){} }
+
+            const timer = setTimeout(() => {
+              pendingApprovals.delete(aid);
+              m._pendingAction = null;
+              try { res.writeHead(200); res.end("ok"); } catch(_){}
+              broadcastCtrl({ type: "actions_clear", sessionId: aid });
+              broadcastCtrl({ type: "session_update", session: monitorInfo(m) });
+            }, 300000);  // 5 minutes
+
+            pendingApprovals.set(aid, { res, timer });
+
+            // Detect CC canceling hook (curl disconnected)
+            res.on("close", () => {
+              if (res.writableFinished) return;  // We already responded, ignore
+              const pa = pendingApprovals.get(aid);
+              if (pa && pa.res === res) {
+                console.log("[RES CLOSE] client disconnected for", aid);
+                clearTimeout(pa.timer);
+                pendingApprovals.delete(aid);
+                m._pendingAction = null;
+                broadcastCtrl({ type: "actions_clear", sessionId: aid });
+                broadcastCtrl({ type: "session_update", session: monitorInfo(m) });
+              }
+            });
+
+            // Broadcast actions to ALL connected clients (dashboard + terminal viewers)
+            const actionsMsg = { type: "actions", sessionId: aid, tool, summary, detail,
+              actions: [
+                { label: "\u2713 Allow", decision: "allow", style: "primary" },
+                { label: "\u2717 Deny", decision: "deny", style: "danger" },
+              ],
+            };
+            broadcastCtrl(actionsMsg);
+            broadcastCtrl({ type: "session_update", session: monitorInfo(m) });
+            return; // Hold response
+          }
+        }
       } catch (_) {}
       res.writeHead(200);
       res.end("ok");
@@ -1150,6 +1719,9 @@ wss.on("connection", (ws) => {
   clientSessions.set(ws, null);
   // Send current session list to new client
   ws.send("\x00" + JSON.stringify({ type: "sessions", data: getSessionList() }));
+  // Suppress session_update broadcasts for 3s so clients don't re-trigger alerts
+  // for sessions already included in the initial "sessions" message above
+  ws._suppressUpdatesUntil = Date.now() + 3000;
 
   ws.on("message", (raw) => {
     const str = raw.toString();
@@ -1186,6 +1758,52 @@ wss.on("connection", (ws) => {
     const m = findMonitorById(sid);
     if (m && m._proxyWs && m._proxyWs.readyState === 1) {
       m._proxyWs.send("\x00" + JSON.stringify({ type: "input", data: str }));
+      if (m.waiting) { m.waiting = false; scheduleUpdate(m); }
+      return;
+    }
+
+    // ── No proxy but has TTY: inject input via osascript to correct terminal window ──
+    if (m && !m._proxyWs && m._tty) {
+      try {
+        if (!m._termApp) {
+          const shellLine = cp.execSync(`ps -t ${m._tty} -o pid,ppid,comm 2>/dev/null | grep -E '\\-zsh|\\-bash|\\-fish' | head -1`).toString().trim();
+          const shellPpid = shellLine.split(/\s+/)[1];
+          if (shellPpid) {
+            const appComm = cp.execSync(`ps -p ${shellPpid} -o comm= 2>/dev/null`).toString().trim();
+            m._termApp = appComm.split("/").pop();
+          }
+        }
+        if (m._termApp) {
+          const text = str.replace(/\r$/, "");
+          cp.execSync("pbcopy", { input: text });
+          // Find the hookSid to match window title
+          const hookSid = m.id.replace(/^mon-/, "").slice(0, 8);
+          // AppleScript: find window containing session ID, activate it, then paste+enter
+          const script = `
+tell application "System Events"
+  tell process "${m._termApp}"
+    set frontmost to true
+    set targetWindow to missing value
+    repeat with w in windows
+      if name of w contains "${hookSid}" then
+        set targetWindow to w
+        exit repeat
+      end if
+    end repeat
+    if targetWindow is not missing value then
+      perform action "AXRaise" of targetWindow
+    end if
+  end tell
+  delay 0.2
+  keystroke "v" using command down
+  delay 0.1
+  keystroke return
+end tell`;
+          cp.exec(`osascript -e '${script}'`, (err, _out, stderr) => {
+            if (err) console.log("[osascript error]", stderr.trim());
+          });
+        }
+      } catch (e) { console.log("[INPUT error]", e.message); }
       if (m.waiting) { m.waiting = false; scheduleUpdate(m); }
       return;
     }
@@ -1254,6 +1872,14 @@ function handleControl(ws, ctrl) {
         if (s.scrollback) ws.send(s.scrollback);
         const info = s.source === "monitor" ? monitorInfo(s) : sessionInfo(s);
         ws.send("\x00" + JSON.stringify({ type: "joined", session: info }));
+        // Send saved cards for monitor sessions (read from disk)
+        if (s.source === "monitor") {
+          try {
+            const hookSid = s.id.replace(/^mon-/, "");
+            const cards = JSON.parse(fs.readFileSync(path.join(CARDS_DIR, hookSid + ".json"), "utf8"));
+            if (cards.length) ws.send("\x00" + JSON.stringify({ type: "card_history", sessionId: s.id, cards: cards.slice(-100) }));
+          } catch (_) {}
+        }
         if (ctrl.cols && ctrl.rows) {
           if (s.ptyProcess) s.ptyProcess.resize(ctrl.cols, ctrl.rows);
           if (s._proxyWs && s._proxyWs.readyState === 1)
@@ -1311,6 +1937,31 @@ function handleControl(ws, ctrl) {
       _hostWs = ws;
       ws._isHost = true;
       ws.send("\x00" + JSON.stringify({ type: "host_ready" }));
+      break;
+    }
+
+    case "hook_decision": {
+      // Return decision to Claude Code via held hook response
+      const approval = pendingApprovals.get(ctrl.sessionId);
+      if (approval) {
+        clearTimeout(approval.timer);
+        pendingApprovals.delete(ctrl.sessionId);
+        try {
+          approval.res.writeHead(200, { "Content-Type": "application/json" });
+          if (ctrl.decision === "allow") {
+            approval.res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } }));
+          } else {
+            approval.res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: "Denied from CC Remote" } } }));
+          }
+        } catch (_) {}
+      }
+      // Clear UI state
+      const am = findMonitorById(ctrl.sessionId);
+      if (am) {
+        am._pendingAction = null;
+        broadcastCtrl({ type: "actions_clear", sessionId: ctrl.sessionId });
+        broadcastCtrl({ type: "session_update", session: monitorInfo(am) });
+      }
       break;
     }
 

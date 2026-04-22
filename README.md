@@ -9,7 +9,7 @@ Monitor and control Claude Code tasks from your phone or browser in real time.
 
 ### macOS Menu Bar App (Recommended)
 
-Download [CCRemoteServer-v1.1.0.dmg](https://github.com/AndyChang33/cc-remote/releases/latest/download/CCRemoteServer-v1.1.0.dmg) — a macOS menu bar app. One click to start/stop the server, view usage cost, and configure port/work directory. Sandbox mode restricts remote terminals to a safe directory. No terminal needed.
+Download [CCRemoteServer-v1.2.0.dmg](https://github.com/AndyChang33/cc-remote/releases/latest/download/CCRemoteServer-v1.2.0.dmg) — a macOS menu bar app. One click to start/stop the server, view usage cost, and configure port/work directory. Sandbox mode restricts remote terminals to a safe directory. No terminal needed.
 
 1. Open the DMG and drag to Applications
 2. Launch — a terminal icon appears in the menu bar
@@ -34,11 +34,17 @@ Open the address printed in the terminal. Phone and computer must be on the same
 ### Docker
 
 ```bash
-# One command: build container + start host daemon
-ccd
+docker compose up -d          # start server container
+node scripts/ccrd.js          # start host daemon for terminal sessions
 
 # Stop
-ccd-stop
+docker compose down
+```
+
+Or use shell aliases (see [Shell Aliases](#shell-aliases)):
+```bash
+ccd              # docker compose up + ccrd (one command)
+ccd-stop         # docker compose down
 ```
 
 The container runs only the server (`NO_PTY=1`). Terminal sessions are spawned on the host via `ccrd`. Click "New" in the dashboard to create a host shell.

@@ -23,6 +23,64 @@ cp server.js ~/.cc-remote/server.js
 
 `.gitignore` 已排除 `CCRemote/` 和 `CCRemoteServer/`，各自独立提交。
 
+## CCRemote iOS App 打包与发布
+
+### 签名信息
+
+| 项目 | 值 |
+|------|-----|
+| Bundle ID | `com.ccremote.CCRemote` |
+| Team ID | `PB83JNGRR2` |
+| Signing Identity | `Apple Distribution: feifan chang (PB83JNGRR2)` |
+| Provisioning Profile | `CC Remote AppStore` |
+| API Key ID | `493TZYTG28` |
+| API Issuer ID | `03c35886-4db7-4f27-a7b7-1e75b01b1bc9` |
+| API Key 路径 | `CCRemote/certs/AuthKey_493TZYTG28.p8` |
+| Provisioning Profile 路径 | `CCRemote/certs/CC_Remote_AppStore.mobileprovision` |
+
+**注意**：`CCRemote/certs/` 目录已在 `.gitignore` 中排除，不会上传到远端。
+
+### 打包流程
+
+```bash
+cd CCRemote
+
+# 1. 生成 Xcode 项目
+xcodegen generate
+
+# 2. 安装 provisioning profile（首次或更新后）
+cp certs/CC_Remote_AppStore.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/4270c184-f499-4cb8-951d-322899f51033.mobileprovision
+
+# 3. Archive
+xcodebuild -project CCRemote.xcodeproj -scheme CCRemote \
+  -destination 'generic/platform=iOS' \
+  -archivePath build/CCRemote.xcarchive archive
+
+# 4. 导出 IPA
+xcodebuild -exportArchive \
+  -archivePath build/CCRemote.xcarchive \
+  -exportPath build/ipa \
+  -exportOptionsPlist build/ExportOptions.plist
+
+# 5. 上传到 App Store Connect（需要 Issuer ID）
+xcrun altool --upload-app -f build/ipa/CCRemote.ipa \
+  --type ios --apiKey 493TZYTG28 --apiIssuer 03c35886-4db7-4f27-a7b7-1e75b01b1bc9 \
+  --api_key_path certs/
+```
+
+### 模拟器安装
+
+```bash
+# 构建
+xcodebuild -project CCRemote.xcodeproj -scheme CCRemote \
+  -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' \
+  -derivedDataPath build build
+
+# 安装并启动
+xcrun simctl install <SIMULATOR_ID> build/Build/Products/Debug-iphonesimulator/CCRemote.app
+xcrun simctl launch <SIMULATOR_ID> com.ccremote.CCRemote
+```
+
 ## Commands
 
 ### Local (直接运行)
